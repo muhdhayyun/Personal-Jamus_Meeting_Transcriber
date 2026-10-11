@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('jamus', {
   status: () => ipcRenderer.invoke('app:status'),
   listDevices: () => ipcRenderer.invoke('devices:list'),
 
+  listAudioApps: () => ipcRenderer.invoke('audio:apps'),
+
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (partial) => ipcRenderer.invoke('settings:save', partial),
 
@@ -38,6 +40,11 @@ contextBridge.exposeInMainWorld('jamus', {
     const handler = (_e, timeline) => cb(timeline);
     ipcRenderer.on('live:transcript', handler);
     return () => ipcRenderer.removeListener('live:transcript', handler);
+  },
+  onAudioSource: (cb) => {
+    const handler = (_e, info) => cb(info);
+    ipcRenderer.on('live:audio-source', handler);
+    return () => ipcRenderer.removeListener('live:audio-source', handler);
   },
   onLiveSummary: (cb) => {
     const handler = (_e, text) => cb(text);

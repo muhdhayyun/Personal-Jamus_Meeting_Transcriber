@@ -43,6 +43,8 @@ async function loadCore() {
     loadSession: session.loadSession,
     recordSession: recorder.recordSession,
     wasapiBuilt: wasapi.wasapiBuilt,
+    systemAudioRule: wasapi.systemAudioRule,
+    listAudioApps: wasapi.listAudioApps,
     assertWasapiBuilt: wasapi.assertWasapiBuilt,
     transcribeSession: transcribe.transcribeSession,
     isBuilt: modelManager.isBuilt,
@@ -118,7 +120,13 @@ ipcMain.handle('devices:list', async () => core.listAudioDevices().devices);
 // ---- settings ----------------------------------------------------------
 ipcMain.handle('settings:get', async () => {
   const cfg = core.loadConfig();
-  return { model: cfg.model, language: cfg.language, labels: cfg.labels, devices: cfg.devices, storage: cfg.storage, groq: cfg.groq, live: cfg.live };
+  return { model: cfg.model, language: cfg.language, labels: cfg.labels, devices: cfg.devices, storage: cfg.storage, groq: cfg.groq, live: cfg.live, systemAudio: core.systemAudioRule(cfg) };
+});
+
+// Apps that currently have an audio session (for the system-audio picker).
+ipcMain.handle('audio:apps', async () => {
+  if (!isWin) return [];
+  return core.listAudioApps();
 });
 
 ipcMain.handle('settings:save', async (_e, partial) => {
@@ -277,6 +285,7 @@ ipcMain.handle('live:start', async (_e, { title, mic }) => {
     onTranscript: (timeline) => mainWindow?.webContents.send('live:transcript', timeline),
     onSummary: (text) => mainWindow?.webContents.send('live:summary', text),
     onStatus: (msg) => status(msg),
+    onAudioSource: (info) => mainWindow?.webContents.send('live:audio-source', info),
   });
   const info = await inst.start();
   liveSessionInstance = inst;

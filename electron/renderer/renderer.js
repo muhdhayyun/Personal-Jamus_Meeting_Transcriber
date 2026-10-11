@@ -162,37 +162,173 @@ async function openRecordPanel() {
         ${mics.length ? '' : '<div class="hint" style="color:var(--warn)">No microphone detected.</div>'}
       </div>
       <div class="field" id="sysAudioField"></div>
-      <button class="btn primary" id="startRec" ${mics.length ? '' : 'disabled'}>● Start recording</button>
+      <button class="btn primary" id="startRec" data-mic-ok="${mics.length ? 'true' : 'false'}" ${mics.length ? '' : 'disabled'}>● Start recording</button>
     </div>`;
   $('#startRec')?.addEventListener('click', startRecording);
-  renderSysAudioStatus();
+  startAudioPicker();
 }
 
-function renderSysAudioStatus() {
+// ---------- system-audio source picker ----------
+// Three modes: capture everything, capture ONLY one app, or block one app. The rule is saved
+// the moment you change it, and the app list refreshes while this screen is open so the level
+// meters show which app is actually making sound.
+const SYS_MODES = [
+  { id: 'all', label: 'Everything' },
+  { id: 'only', label: 'Only one app' },
+  { id: 'block', label: 'Block one app' },
+];
+
+function sysRule() {
+  const sa = state.settings?.systemAudio || {};
+  return { mode: sa.mode || 'all', process: sa.process || null };
+}
+
+async function saveSysRule(rule) {
+  state.settings = { ...state.settings, systemAudio: rule };
+  await J.saveSettings({ systemAudio: rule }).catch(() => {});
+}
+
+function startAudioPicker() {
+  clearInterval(state.appPoll);
+  state.apps = [];
+  state.appsLoaded = false;
+  paintAudioPicker();
+  const tick = async () => {
+    if (!$('#sysAudioField')) { clearInterval(state.appPoll); return; } // left this screen
+    if (state.appPollBusy || sysRule().mode === 'all') return;
+    state.appPollBusy = true;
+    try {
+      state.apps = await J.listAudioApps();
+      state.appsError = null;
+    } catch (e) {
+      state.appsError = e.message;
+    }
+    state.appPollBusy = false;
+    state.appsLoaded = true;
+    paintAppList();
+  };
+  state.appPoll = setInterval(tick, 900);
+  tick();
+}
+
+function paintAudioPicker() {
   const el = $('#sysAudioField');
   if (!el) return;
-  const sa = state.settings?.systemAudio || {};
-  const name = sa.excludeProcess;
-  const on = name && sa.enabled !== false;
-  el.innerHTML = name
-    ? `<label>System audio</label>
-       <div class="toggle-row" style="margin:0;">
-         <span>${on ? `🔇 Excluding <strong>${esc(name)}</strong> — everything else is captured` : `Excluding <strong>${esc(name)}</strong> is off — capturing everything`}</span>
-         <input type="checkbox" id="sysAudioToggle" ${on ? 'checked' : ''} />
-       </div>`
-    : `<label>System audio</label><div class="hint" style="margin:0;">Capturing everything. Set an app to exclude (e.g. Spotify) in Settings.</div>`;
-  $('#sysAudioToggle')?.addEventListener('change', async (e) => {
-    const enabled = e.target.checked;
-    await J.saveSettings({ systemAudio: { enabled } });
-    state.settings = await J.getSettings().catch(() => state.settings);
-    renderSysAudioStatus();
+  const rule = sysRule();
+  el.innerHTML = `
+    <label>System audio</label>
+    <div class="seg" role="radiogroup" aria-label="System audio source">
+      ${SYS_MODES.map((m) => `<button type="button" class="seg-btn ${rule.mode === m.id ? 'active' : ''}" role="radio" aria-checked="${rule.mode === m.id}" data-sysmode="${m.id}">${m.label}</button>`).join('')}
+    </div>
+    <div id="sysAppList"></div>
+    <div class="sys-summary" id="sysSummary"></div>`;
+  el.querySelectorAll('[data-sysmode]').forEach((b) => b.addEventListener('click', async () => {
+    await saveSysRule({ mode: b.dataset.sysmode, process: b.dataset.sysmode === 'all' ? rule.process : sysRule().process });
+    paintAudioPicker();
+    if (sysRule().mode !== 'all') startAudioPicker();
+  }));
+  paintAppList();
+}
+
+function paintAppList() {
+  const list = $('#sysAppList');
+  if (!list) return;
+  const rule = sysRule();
+  const summary = $('#sysSummary');
+  const startBtn = $('#startRec');
+  const micOk = !startBtn || startBtn.dataset.micOk !== 'false';
+
+  if (rule.mode === 'all') {
+    list.innerHTML = '';
+    summary.className = 'sys-summary';
+    summary.innerHTML = '🔊 Capturing everything you hear.';
+    if (startBtn) startBtn.disabled = !micOk;
+    return;
+  }
+
+  const apps = [...(state.apps || [])].sort((a, b) => (b.peak - a.peak) || a.label.localeCompare(b.label));
+  const selected = rule.process;
+  const running = apps.find((a) => a.name.toLowerCase() === (selected || '').toLowerCase());
+
+  const rows = apps.map((a) => {
+    const on = selected && a.name.toLowerCase() === selected.toLowerCase();
+    const playing = a.peak > 0.003;
+    const pct = Math.min(100, Math.round(Math.sqrt(a.peak) * 100));
+    return `<button type="button" class="app-row ${on ? 'selected' : ''}" data-app="${esc(a.name)}">
+      <span class="app-main"><span class="app-name">${esc(a.label)}</span><span class="app-proc">${esc(a.name)}</span></span>
+      <span class="app-meter"><span class="app-meter-fill ${playing ? 'live' : ''}" style="width:${pct}%"></span></span>
+      <span class="app-state ${playing ? 'live' : ''}">${playing ? 'Playing' : 'Silent'}</span>
+    </button>`;
   });
+  // The saved app may not be running right now — keep it visible so it's clear what's set.
+  if (selected && !running) {
+    rows.unshift(`<button type="button" class="app-row selected missing" data-app="${esc(selected)}">
+      <span class="app-main"><span class="app-name">${esc(selected)}</span><span class="app-proc">not running</span></span>
+      <span class="app-meter"></span><span class="app-state">Not running</span>
+    </button>`);
+  }
+  list.innerHTML = rows.length
+    ? rows.join('')
+    : `<div class="hint">${state.appsError ? esc(state.appsError) : state.appsLoaded ? 'No apps with audio found. Start playing sound in the app, and it will appear here.' : 'Looking for apps…'}</div>`;
+  list.querySelectorAll('[data-app]').forEach((b) => b.addEventListener('click', async () => {
+    // Click the selected app again to clear it.
+    const next = selected && b.dataset.app.toLowerCase() === selected.toLowerCase() ? null : b.dataset.app;
+    await saveSysRule({ mode: rule.mode, process: next });
+    paintAppList();
+  }));
+
+  const verb = rule.mode === 'only' ? 'Recording only' : 'Blocking';
+  const need = rule.mode === 'only';
+  if (!selected) {
+    summary.className = 'sys-summary warn';
+    summary.innerHTML = need ? '👆 Pick the app to record. Everything else will be ignored.' : '👆 Pick the app to block. Everything else is still recorded.';
+  } else if (running) {
+    summary.className = 'sys-summary ok';
+    summary.innerHTML = rule.mode === 'only'
+      ? `🎯 ${verb} <strong>${esc(running.label)}</strong>. Everything else you hear is ignored.`
+      : `🔇 ${verb} <strong>${esc(running.label)}</strong>. Everything else is still recorded.`;
+  } else {
+    summary.className = 'sys-summary warn';
+    summary.innerHTML = need
+      ? `⚠ <strong>${esc(selected)}</strong> isn't running. Start it first, or pick another app. Recording is blocked until then.`
+      : `⚠ <strong>${esc(selected)}</strong> isn't running, so nothing would be blocked. If it starts later, it will be recorded.`;
+  }
+  // "Only" needs a running app; "block" just needs a choice (a missing app only triggers the warning above).
+  if (startBtn) startBtn.disabled = !micOk || !selected || (need && !running);
+}
+
+/** One line shown while recording: what system audio is being captured, confirmed by the recorder. */
+function sourceBarHtml() {
+  const rule = state.recRule || { mode: 'all', process: null };
+  const att = state.audioSource;
+  if (rule.mode === 'all') return '🔊 Capturing all system audio';
+  if (att && att.attached === false) {
+    return rule.mode === 'only'
+      ? `⚠ <strong>${esc(rule.process)}</strong> isn't running`
+      : `⚠ <strong>${esc(rule.process)}</strong> isn't running — nothing is being blocked, all system audio is recorded`;
+  }
+  if (att && att.attached) {
+    return rule.mode === 'only'
+      ? `🎯 Recording only <strong>${esc(rule.process)}</strong>`
+      : `🔇 Blocking <strong>${esc(rule.process)}</strong> — everything else is recorded`;
+  }
+  return rule.mode === 'only' ? `🎯 Recording only ${esc(rule.process)}…` : `🔇 Blocking ${esc(rule.process)}…`;
+}
+
+function paintSourceBar() {
+  const el = $('#recSource');
+  if (!el) return;
+  el.innerHTML = sourceBarHtml();
+  el.classList.toggle('warn', /^⚠/.test(el.textContent));
 }
 
 async function startRecording() {
   const title = $('#recTitle').value.trim() || 'Untitled meeting';
   const mic = $('#recMic').value;
   $('#startRec').disabled = true;
+  clearInterval(state.appPoll);
+  state.recRule = sysRule();
+  state.audioSource = null;
   setStatus('Starting…');
   try {
     await J.startLive({ title, mic });
@@ -217,6 +353,7 @@ function renderRecording(title) {
         <div class="pulse">●</div>
         <div class="timer" id="recTimerEl">00:00:00</div>
         <div class="rec-sub">Recording “${esc(title)}” — your mic + system audio</div>
+        <div class="rec-source" id="recSource"></div>
         <div class="rec-actions">
           <button class="btn danger" id="stopRec">■ Stop &amp; finish</button>
           <button class="btn" id="cancelRec">Cancel</button>
@@ -228,6 +365,7 @@ function renderRecording(title) {
       </div>
       <div class="rec-live" id="recLive"></div>
     </div>`;
+  paintSourceBar();
   clearInterval(state.recTimer);
   state.recTimer = setInterval(() => {
     $('#recTimerEl').textContent = fmtDur((Date.now() - state.recStart) / 1000);
@@ -481,14 +619,8 @@ async function openSettings() {
     </div>
 
     <div class="section-title">System Audio</div>
-    <div class="field toggle-row">
-      <label style="margin:0;">Exclude an app from system-audio capture</label>
-      <input type="checkbox" id="setExcludeEnabled" ${s.systemAudio?.enabled !== false ? 'checked' : ''} />
-    </div>
     <div class="field">
-      <input type="text" id="setExcludeProcess" value="${esc(s.systemAudio?.excludeProcess || '')}" placeholder="e.g. Spotify.exe" />
-      <div class="hint" id="setExcludeStatus"></div>
-      <div class="hint">That app's sound is left out of the recording; everything else you hear is still captured. Only one app at a time. Windows 10 2004+ / Windows 11 only. Leave blank (or turn the toggle off) to capture everything.</div>
+      <div class="hint" style="margin:0;">Choose what Jamus hears (everything, only one app, or block one app) on the <strong>New recording</strong> screen, right before you record.</div>
     </div>
 
     <div class="section-title">Live Mode (while recording)</div>
@@ -528,18 +660,6 @@ async function openSettings() {
         ${sec('summary', 'Summary')} ${sec('actionItems', 'Action items')} ${sec('keyDecisions', 'Key decisions')} ${sec('topicsQuestions', 'Topics & open questions')}
       </div>
     </div>`;
-  const updateExcludeStatus = () => {
-    const name = $('#setExcludeProcess').value.trim();
-    const on = $('#setExcludeEnabled').checked;
-    $('#setExcludeStatus').innerHTML = !name
-      ? 'Nothing set — type an app above, then click Save.'
-      : on
-        ? `✓ Will exclude <strong>${esc(name)}</strong> once saved.`
-        : `<strong>${esc(name)}</strong> is saved but the toggle is off — everything will be captured.`;
-  };
-  updateExcludeStatus();
-  $('#setExcludeProcess')?.addEventListener('input', updateExcludeStatus);
-  $('#setExcludeEnabled')?.addEventListener('change', updateExcludeStatus);
   $('#delAllAudio')?.addEventListener('click', async () => {
     if (!confirm("Delete the audio (.wav) for ALL meetings?\n\nFrees the most space. Transcripts and insights are kept and meetings stay listed, but you won't be able to re-transcribe any of them.")) return;
     const r = await J.deleteAllAudio().catch((e) => { alert(e.message); return null; });
@@ -561,10 +681,6 @@ async function saveSettings() {
     labels: { me: $('#setMe').value.trim() || 'Me', participants: $('#setOthers').value.trim() || 'Participants' },
     maxSentencesPerTurn: Number($('#setMaxSentences').value) || 6,
     storage: { maxRecordingsGB: Number($('#setCap').value) || 20 },
-    systemAudio: {
-      excludeProcess: $('#setExcludeProcess').value.trim() || null,
-      enabled: $('#setExcludeEnabled').checked,
-    },
     live: {
       summaryProvider: $('#setLiveProvider').value,
       summaryIntervalSec: Number($('#setLiveInterval').value) || 45,
@@ -596,6 +712,8 @@ $('#themeBtn').addEventListener('click', () => applyTheme(document.documentEleme
 applyTheme(document.documentElement.dataset.theme); // sync the toggle icon
 $('#settingsClose').addEventListener('click', () => $('#settingsModal').classList.add('hidden'));
 $('#settingsSave').addEventListener('click', saveSettings);
+
+J.onAudioSource((info) => { state.audioSource = info; paintSourceBar(); });
 
 J.onStatus((msg) => setStatus(msg && msg !== 'Done.' ? msg : null));
 

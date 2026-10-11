@@ -4,8 +4,9 @@
 // and writes it to mono 16-bit PCM WAV — no Stereo Mix / virtual cable required.
 //
 // Usage:
-//   wasapi-loopback.exe [--exclude-process <name>] <output.wav>
-//   wasapi-loopback.exe [--exclude-process <name>] --segments <outDir> <segSeconds>
+//   wasapi-loopback.exe [--exclude-process <name> | --include-process <name>] <output.wav>
+//   wasapi-loopback.exe [--exclude-process <name> | --include-process <name>] --segments <outDir> <segSeconds>
+//   wasapi-loopback.exe --list-audio-apps
 //
 //   --exclude-process <name>   Leave one app's audio out of the capture (e.g. "Spotify.exe")
 //                               while still capturing everything else on the default output
@@ -13,6 +14,15 @@
 //                               (Windows 10 2004+ / Windows 11). Matches by process name;
 //                               excludes that process's whole child-process tree. If no
 //                               running process matches, falls back to capturing everything.
+//   --include-process <name>   The reverse: capture ONLY that app (and its child processes);
+//                               everything else playing is ignored. If no running process
+//                               matches, exits with an error rather than capturing everything.
+//   (<name> may also be "pid:1234" to target an exact process id.)
+//   --list-audio-apps          Print a JSON array of apps that have an audio session on the
+//                               default output device ({name,label,pids,active,peak}) and exit.
+//
+// On start, one line "[wasapi] STATUS {json}" is written to stderr describing whether the
+// include/exclude target actually attached, so the host UI can show the real state.
 //
 // Segmented mode: rolling N-second WAV segments (live mode) — each finalized segment is
 // immediately valid, and <outDir>/segments.jsonl gets one JSON line per completed segment:
@@ -39,6 +49,7 @@ internal static class Program
 
     private const string VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback";
     private const int AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1;
+    private const int PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0;
     private const int PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1;
     private const ushort VT_BLOB = 65;
 
@@ -58,14 +69,21 @@ internal static class Program
         CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
         RoInitialize(RO_INIT_MULTITHREADED);
 
-        string excludeProcess = null;
+        string targetProcess = null;
+        bool includeMode = false;
         var rest = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--exclude-process")
+            if (args[i] == "--list-audio-apps")
             {
-                if (i + 1 >= args.Length) { Console.Error.WriteLine("--exclude-process requires a process name"); return 2; }
-                excludeProcess = args[++i];
+                try { Console.Out.WriteLine(ListAudioApps()); return 0; }
+                catch (Exception ex) { Console.Error.WriteLine("[wasapi] " + ex.Message); return 1; }
+            }
+            else if (args[i] == "--exclude-process" || args[i] == "--include-process")
+            {
+                if (i + 1 >= args.Length) { Console.Error.WriteLine(args[i] + " requires a process name"); return 2; }
+                includeMode = args[i] == "--include-process";
+                targetProcess = args[++i];
             }
             else
             {
@@ -76,8 +94,9 @@ internal static class Program
 
         if (args.Length < 1)
         {
-            Console.Error.WriteLine("Usage: wasapi-loopback.exe [--exclude-process <name>] <output.wav>");
-            Console.Error.WriteLine("       wasapi-loopback.exe [--exclude-process <name>] --segments <outDir> <segSeconds>");
+            Console.Error.WriteLine("Usage: wasapi-loopback.exe [--exclude-process <name> | --include-process <name>] <output.wav>");
+            Console.Error.WriteLine("       wasapi-loopback.exe [--exclude-process <name> | --include-process <name>] --segments <outDir> <segSeconds>");
+            Console.Error.WriteLine("       wasapi-loopback.exe --list-audio-apps");
             return 2;
         }
 
@@ -89,7 +108,7 @@ internal static class Program
 
         try
         {
-            var audio = SetupAudio(excludeProcess);
+            var audio = SetupAudio(targetProcess, includeMode);
             if (args[0] == "--segments")
             {
                 if (args.Length < 3) { Console.Error.WriteLine("--segments requires <outDir> <segSeconds>"); return 2; }
@@ -125,23 +144,57 @@ internal static class Program
         public SampleType Type;
     }
 
-    private static AudioSetup SetupAudio(string excludeProcessName)
+    private static AudioSetup SetupAudio(string targetProcessName, bool includeMode)
     {
-        if (!string.IsNullOrEmpty(excludeProcessName))
+        string mode = includeMode ? "include" : "exclude";
+        if (!string.IsNullOrEmpty(targetProcessName))
         {
-            int pid = ResolveTargetPid(excludeProcessName);
+            int pid = ResolveTargetPid(targetProcessName);
             if (pid > 0)
             {
                 Console.Error.WriteLine(string.Format(
-                    "[wasapi] excluding \"{0}\" (pid {1} and its child processes) from system-audio capture",
-                    excludeProcessName, pid));
-                return SetupProcessExcludedAudio(pid);
+                    includeMode
+                        ? "[wasapi] capturing ONLY \"{0}\" (pid {1} and its child processes)"
+                        : "[wasapi] excluding \"{0}\" (pid {1} and its child processes) from system-audio capture",
+                    targetProcessName, pid));
+                var setup = SetupProcessLoopbackAudio(pid, includeMode);
+                WriteStatus(mode, targetProcessName, true, pid);
+                return setup;
+            }
+            WriteStatus(mode, targetProcessName, false, 0);
+            if (includeMode)
+            {
+                // Capturing everything here would silently record apps the user asked to leave out.
+                throw new Exception(string.Format(
+                    "\"{0}\" isn't running, so there is nothing to record. Start it (or pick another app) and try again.",
+                    targetProcessName));
             }
             Console.Error.WriteLine(string.Format(
                 "[wasapi] --exclude-process \"{0}\": no running process found, capturing everything",
-                excludeProcessName));
+                targetProcessName));
         }
         return SetupDefaultEndpointAudio();
+    }
+
+    /// One machine-readable line the host app parses to show whether the target really attached.
+    private static void WriteStatus(string mode, string target, bool attached, int pid)
+    {
+        Console.Error.WriteLine(string.Format(
+            "[wasapi] STATUS {{\"mode\":\"{0}\",\"target\":\"{1}\",\"attached\":{2},\"pid\":{3}}}",
+            mode, JsonEscape(target), attached ? "true" : "false", pid));
+    }
+
+    private static string JsonEscape(string s)
+    {
+        if (s == null) return "";
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in s)
+        {
+            if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+            else if (c < 0x20) sb.Append(' ');
+            else sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private static AudioSetup SetupDefaultEndpointAudio()
@@ -161,6 +214,14 @@ internal static class Program
     /// longest-running matching instance — the most likely root of the app's process tree.
     private static int ResolveTargetPid(string processName)
     {
+        // "pid:1234" targets one exact process (used when the UI knows the precise PID).
+        if (processName.StartsWith("pid:", StringComparison.OrdinalIgnoreCase))
+        {
+            int exact;
+            if (!int.TryParse(processName.Substring(4), out exact)) return 0;
+            try { return Process.GetProcessById(exact).Id; } catch { return 0; }
+        }
+
         string name = processName;
         if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
 
@@ -188,15 +249,141 @@ internal static class Program
         try { return p.StartTime; } catch { return null; }
     }
 
+    // ---- --list-audio-apps ---------------------------------------------------
+
+    private class SessionProbe
+    {
+        public string Name;     // e.g. "Spotify.exe"
+        public string Label;    // friendly name, e.g. "Spotify"
+        public int Pid;
+        public bool Active;
+        public IAudioMeterInformation Meter;
+        public float Peak;
+    }
+
+    /// Lists the apps that currently have an audio session on the default output device,
+    /// grouped by process name, with a short-sampled peak level so the UI can draw a meter.
+    private static string ListAudioApps()
+    {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDevice device;
+        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(0, 0, out device));
+
+        object mgrObj;
+        Guid iidMgr = typeof(IAudioSessionManager2).GUID;
+        Marshal.ThrowExceptionForHR(device.Activate(ref iidMgr, 23 /*CLSCTX_ALL*/, IntPtr.Zero, out mgrObj));
+        var mgr = (IAudioSessionManager2)mgrObj;
+
+        IAudioSessionEnumerator sessions;
+        Marshal.ThrowExceptionForHR(mgr.GetSessionEnumerator(out sessions));
+        int count;
+        Marshal.ThrowExceptionForHR(sessions.GetCount(out count));
+
+        int self = Process.GetCurrentProcess().Id;
+        var probes = new List<SessionProbe>();
+        for (int i = 0; i < count; i++)
+        {
+            try
+            {
+                object obj;
+                if (sessions.GetSession(i, out obj) != 0 || obj == null) continue;
+                var ctl = (IAudioSessionControl2)obj;
+                if (ctl.IsSystemSoundsSession() == 0) continue; // S_OK = the "System Sounds" session
+                int state;
+                ctl.GetState(out state);
+                if (state == 2) continue; // expired
+                uint pid;
+                ctl.GetProcessId(out pid);
+                if (pid == 0 || (int)pid == self) continue;
+
+                string procName, label;
+                if (!DescribeProcess((int)pid, out procName, out label)) continue;
+
+                probes.Add(new SessionProbe
+                {
+                    Name = procName,
+                    Label = label,
+                    Pid = (int)pid,
+                    Active = state == 1,
+                    Meter = obj as IAudioMeterInformation,
+                });
+            }
+            catch { /* a session can vanish mid-enumeration; skip it */ }
+        }
+
+        // Sample peaks for ~160 ms and keep the max, so a quiet instant doesn't read as silence.
+        for (int s = 0; s < 8; s++)
+        {
+            foreach (var p in probes)
+            {
+                if (p.Meter == null) continue;
+                try { float v; if (p.Meter.GetPeakValue(out v) == 0 && v > p.Peak) p.Peak = v; } catch { }
+            }
+            Thread.Sleep(20);
+        }
+
+        // Group by process name.
+        var order = new List<string>();
+        var groups = new Dictionary<string, List<SessionProbe>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in probes)
+        {
+            if (!groups.ContainsKey(p.Name)) { groups[p.Name] = new List<SessionProbe>(); order.Add(p.Name); }
+            groups[p.Name].Add(p);
+        }
+
+        var sb = new System.Text.StringBuilder("[");
+        for (int g = 0; g < order.Count; g++)
+        {
+            var list = groups[order[g]];
+            bool active = false;
+            float peak = 0;
+            var pids = new List<string>();
+            foreach (var p in list)
+            {
+                active |= p.Active;
+                if (p.Peak > peak) peak = p.Peak;
+                pids.Add(p.Pid.ToString(CultureInfo.InvariantCulture));
+            }
+            if (g > 0) sb.Append(',');
+            sb.Append(string.Format(CultureInfo.InvariantCulture,
+                "{{\"name\":\"{0}\",\"label\":\"{1}\",\"pids\":[{2}],\"active\":{3},\"peak\":{4:0.####}}}",
+                JsonEscape(order[g]), JsonEscape(list[0].Label), string.Join(",", pids.ToArray()),
+                active ? "true" : "false", peak));
+        }
+        sb.Append("]");
+        return sb.ToString();
+    }
+
+    private static bool DescribeProcess(int pid, out string procName, out string label)
+    {
+        procName = null; label = null;
+        try
+        {
+            var proc = Process.GetProcessById(pid);
+            procName = proc.ProcessName + ".exe";
+            label = proc.ProcessName;
+            try
+            {
+                string desc = proc.MainModule.FileVersionInfo.FileDescription;
+                if (!string.IsNullOrWhiteSpace(desc)) label = desc.Trim();
+            }
+            catch { /* protected/elevated process: keep the plain name */ }
+            return true;
+        }
+        catch { return false; }
+    }
+
     /// Activates the Windows per-process loopback virtual device, configured to capture
     /// everything on the default render endpoint EXCEPT the given process's tree.
-    private static AudioSetup SetupProcessExcludedAudio(int targetPid)
+    private static AudioSetup SetupProcessLoopbackAudio(int targetPid, bool includeMode)
     {
         var activationParams = new AUDIOCLIENT_ACTIVATION_PARAMS
         {
             ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
             TargetProcessId = (uint)targetPid,
-            ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+            ProcessLoopbackMode = includeMode
+                ? PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                : PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
         };
         int paramsSize = Marshal.SizeOf(typeof(AUDIOCLIENT_ACTIVATION_PARAMS));
         IntPtr pParams = Marshal.AllocHGlobal(paramsSize);
@@ -576,6 +763,51 @@ internal interface IAudioCaptureClient
     int GetBuffer(out IntPtr data, out uint numFramesToRead, out uint flags, out long devicePosition, out long qpcPosition);
     int ReleaseBuffer(uint numFramesRead);
     int GetNextPacketSize(out uint numFramesInNextPacket);
+}
+
+// ----- audio session enumeration (for --list-audio-apps) ------------------
+// Only the methods up to the last one we call need declaring, but vtable ORDER must match.
+
+[ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioSessionManager2
+{
+    // IAudioSessionManager
+    int GetAudioSessionControl(ref Guid audioSessionGuid, uint streamFlags, out IntPtr sessionControl);
+    int GetSimpleAudioVolume(ref Guid audioSessionGuid, uint streamFlags, out IntPtr audioVolume);
+    // IAudioSessionManager2
+    int GetSessionEnumerator(out IAudioSessionEnumerator sessionEnum);
+}
+
+[ComImport, Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioSessionEnumerator
+{
+    int GetCount(out int sessionCount);
+    int GetSession(int sessionCount, [MarshalAs(UnmanagedType.IUnknown)] out object session);
+}
+
+// IAudioSessionControl + IAudioSessionControl2, flattened (COM interop doesn't inherit vtables).
+[ComImport, Guid("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioSessionControl2
+{
+    int GetState(out int state);
+    int GetDisplayName(out IntPtr name);
+    int SetDisplayName(IntPtr value, ref Guid eventContext);
+    int GetIconPath(out IntPtr path);
+    int SetIconPath(IntPtr value, ref Guid eventContext);
+    int GetGroupingParam(out Guid groupingParam);
+    int SetGroupingParam(ref Guid groupingParam, ref Guid eventContext);
+    int RegisterAudioSessionNotification(IntPtr newNotifications);
+    int UnregisterAudioSessionNotification(IntPtr newNotifications);
+    int GetSessionIdentifier(out IntPtr retVal);
+    int GetSessionInstanceIdentifier(out IntPtr retVal);
+    int GetProcessId(out uint retVal);
+    [PreserveSig] int IsSystemSoundsSession();
+}
+
+[ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioMeterInformation
+{
+    [PreserveSig] int GetPeakValue(out float peak);
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]

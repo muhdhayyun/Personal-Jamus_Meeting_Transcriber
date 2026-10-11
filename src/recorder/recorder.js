@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { buildCaptureArgs } from './platform.js';
 import { FfmpegCapture } from './ffmpegProcess.js';
-import { WasapiCapture, effectiveExcludeProcess } from './wasapiCapture.js';
+import { WasapiCapture, systemAudioTarget } from './wasapiCapture.js';
 import { saveSession } from '../pipeline/session.js';
 import { logger } from '../utils/logger.js';
 import { probeDuration, ensure16kMono } from '../utils/audio.js';
@@ -29,7 +29,7 @@ export async function recordSession(cfg, session, { waitForStop }) {
 
   const systemViaWasapi = isWin && session.devices.system === 'wasapi';
   const system = systemViaWasapi
-    ? new WasapiCapture({ label: 'system', outFile: session.files.system, excludeProcess: effectiveExcludeProcess(cfg) })
+    ? new WasapiCapture({ label: 'system', outFile: session.files.system, target: systemAudioTarget(cfg) })
     : new FfmpegCapture({
         label: 'system',
         args: buildCaptureArgs({ deviceId: session.devices.system, outFile: session.files.system, sampleRate, channels, codec }),

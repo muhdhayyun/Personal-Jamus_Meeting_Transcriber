@@ -5,12 +5,13 @@ import path from 'node:path';
 import { createSession, saveSession } from './session.js';
 import { mergeTranscripts } from './merge.js';
 import { writeMarkdown } from '../output/markdown.js';
+import { writeSrt } from '../output/srt.js';
 import { writeInsightsForSession } from '../insights/groq.js';
 import { generateLiveSummary } from '../insights/liveSummary.js';
 import { transcribeFile } from '../transcriber/whisper.js';
 import { assertFfmpegAvailable } from '../utils/ffmpeg.js';
 import { FfmpegCapture } from '../recorder/ffmpegProcess.js';
-import { WasapiCapture, assertWasapiBuilt, effectiveExcludeProcess } from '../recorder/wasapiCapture.js';
+import { WasapiCapture, assertWasapiBuilt, systemAudioTarget } from '../recorder/wasapiCapture.js';
 import { buildSegmentedCaptureArgs } from '../recorder/platform.js';
 import { ManifestTailer, segmentFilePath } from '../live/segments.js';
 import { ensureDir } from '../utils/fsx.js';
@@ -76,7 +77,8 @@ export class LiveSession {
     this.sysCapture = new WasapiCapture({
       label: 'system',
       segments: { outDir: this.sysSegDir, segSeconds },
-      excludeProcess: effectiveExcludeProcess(cfg),
+      target: systemAudioTarget(cfg),
+      onStatus: (info) => this.callbacks.onAudioSource?.(info),
     });
 
     const micStart = this.micCapture.start();
@@ -240,6 +242,16 @@ export class LiveSession {
     const durationSec = Math.max(this.micTotalMs / 1000, this.sysTotalMs / 1000, this.lastTimeline.length ? this.lastTimeline[this.lastTimeline.length - 1].end : 0);
 
     writeMarkdown(cfg, { session, timeline: this.lastTimeline, model: cfg.model, durationSec, speakers });
+
+    // Fine-grained (uncoalesced) timeline so subtitle timing stays accurate, same as the batch path.
+    const srtTimeline = mergeTranscripts({
+      micSegments: this.micLive,
+      systemSegments: this.sysLive,
+      systemOffsetSec: (session.offsets?.systemMinusMicMs ?? 0) / 1000,
+      labels,
+      coalesce: false,
+    });
+    writeSrt(cfg, { session, timeline: srtTimeline, speakerPrefix: this.micLive.length > 0 && this.sysLive.length > 0 });
 
     // Stitch finalized segments into normal session WAVs, then drop the segment folders.
     const micFiles = listSegmentFiles(this.micSegDir, 'mic_');
