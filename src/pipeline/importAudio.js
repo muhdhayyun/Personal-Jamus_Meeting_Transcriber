@@ -15,7 +15,7 @@ import { logger } from '../utils/logger.js';
  *
  * @returns {Promise<object>} the session.
  */
-export async function importAudioFile(cfg, srcPath, { title, model, language, labels } = {}) {
+export async function importAudioFile(cfg, srcPath, { title, model, language, labels, maxSegmentSeconds } = {}) {
   assertFfmpegAvailable();
   if (!fileExists(srcPath)) throw new Error(`File not found: ${srcPath}`);
 
@@ -40,6 +40,7 @@ export async function importAudioFile(cfg, srcPath, { title, model, language, la
     model: model || cfg.model,
     language: language || cfg.language,
     labels: labels || cfg.labels,
+    maxSegmentSeconds,
   });
   return session;
 }

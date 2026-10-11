@@ -74,6 +74,7 @@ export async function run(argv) {
     .option('-m, --model <model>', 'Whisper model')
     .option('--language <lang>', 'language code (or "auto")')
     .option('--me <name>', 'speaker label')
+    .option('--max-segment-seconds <n>', 'cap subtitle cue length in seconds (default: unbounded, natural pauses only)')
     .option('--insights', 'also generate AI insights via Groq')
     .action((filePath, opts) => cmdTranscribeFile(filePath, opts));
 
@@ -236,6 +237,7 @@ async function cmdTranscribeFile(filePath, opts) {
     model,
     language: opts.language || cfg.language,
     labels,
+    maxSegmentSeconds: opts.maxSegmentSeconds ? Number(opts.maxSegmentSeconds) : undefined,
   });
   await maybeInsights(cfg, session, opts);
 }

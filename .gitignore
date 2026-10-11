@@ -39,3 +39,6 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Local video files (large, private) used for subtitle/transcribe-file testing
+video/

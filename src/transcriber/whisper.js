@@ -10,7 +10,7 @@ import { fileExists, fileSize } from '../utils/fsx.js';
  *
  * @returns {Promise<Array<{start:number,end:number,text:string}>>} segments in seconds.
  */
-export async function transcribeFile(file, { model = 'large-v3', language = 'auto', vad = true } = {}) {
+export async function transcribeFile(file, { model = 'large-v3', language = 'auto', vad = true, maxSegmentSeconds } = {}) {
   validateModel(model);
   if (!fileExists(file) || fileSize(file) === 0) {
     logger.warn(`Skipping transcription — empty or missing file: ${file}`);
@@ -34,6 +34,10 @@ export async function transcribeFile(file, { model = 'large-v3', language = 'aut
   // filler text ("thank you", "thanks for watching") on silent/quiet audio.
   if (vad && ensureVadModel()) {
     args.push('--vad', '--vad-model', vadModelPath());
+    // Force a cut once continuous speech exceeds this many seconds (still prefers a nearby
+    // natural pause) — controls subtitle cue length; unset = whisper's natural, unbounded
+    // segmentation (can run 10s+ with no pause).
+    if (maxSegmentSeconds) args.push('--vad-max-speech-duration-s', String(maxSegmentSeconds));
   }
 
   const started = Date.now();
