@@ -137,24 +137,46 @@ expected, not a packaging bug.
   prompt, different call site (`LiveSession._maybeSummarize`), different config block
   (`cfg.live`) — these are two separate features that happen to both be "AI insights."
 
-### Per-process system-audio exclusion (e.g. "don't transcribe my Spotify")
-`config.systemAudio.excludeProcess` (settable in the app's Settings, or `~/.jamus/config.json`)
-names one process (e.g. `"Spotify.exe"`) whose audio is left out of the system-audio capture —
-everything else on the default output device is still captured. `config.systemAudio.enabled`
-(default `true`) is a separate on/off flag so the saved process name persists even when
-temporarily toggled off — `effectiveExcludeProcess(cfg)` in `wasapiCapture.js` is the single
-place that combines the two into "what to actually pass on the CLI", used by both
-`recorder.js` and `liveSession.js`. The New Recording screen shows the current state with a
-one-click toggle (writes straight to user config via `settings:save`); Settings has the toggle
-+ text field for changing which app. Threaded through
-`WasapiCapture`/`recorder.js`/`liveSession.js` as an `--exclude-process <name>` CLI flag to
-`wasapi-loopback.exe`, implemented in `native/WasapiLoopbackRecorder.cs` using Windows' **process
-loopback API** (`ActivateAudioInterfaceAsync` on the virtual device path `"VAD\Process_Loopback"`
-with `AUDIOCLIENT_ACTIVATION_PARAMS`/`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`,
-Windows 10 2004+/Windows 11 only) instead of the normal `IMMDevice`-endpoint loopback. Matches
-by process name (resolves to the longest-running matching PID, i.e. the likely tree root); only
-one process can be excluded per recording (an OS API constraint, not an app one); if the named
-process isn't running when the recording starts, it silently falls back to capturing everything.
+### Output formats: Markdown (readable) vs SRT (accurately timed)
+Every transcription (`transcribeSession.js` batch path and `LiveSession.stop()`) writes two
+files from the *same* underlying Whisper segments, built two different ways:
+- `.md` (`src/output/markdown.js`) uses the **coalesced** timeline (`mergeTranscripts(...,
+  coalesce: true)`) — multi-sentence turns, good for reading a conversation.
+- `.srt` (`src/output/srt.js`) uses the **uncoalesced** timeline (`coalesce: false`) — one cue
+  per raw Whisper segment, because subtitle timing needs to track the audio closely; reusing
+  the coalesced multi-sentence turns would produce very long, slow-changing captions. Speaker
+  prefixes (`"Me: ..."`) are only added when both mic and system streams have content — a
+  single-speaker import (e.g. transcribing an mp4) gets plain, unprefixed captions.
+
+### System-audio source: everything / only one app / block one app
+`config.systemAudio` is `{ mode: 'all' | 'only' | 'block', process: "Spotify.exe" | null }`.
+`systemAudioRule(cfg)` in `wasapiCapture.js` normalizes it (and maps the legacy
+`{excludeProcess, enabled}` shape to `block`/`all`); `systemAudioTarget(cfg)` returns `null` for
+"capture everything", used by both `recorder.js` and `liveSession.js`. `'only'` records just that
+app and ignores everything else; `'block'` records everything except that app.
+
+It's chosen on the **New recording** screen (not in Settings): a mode switch plus a live list of
+apps that currently have an audio session, with level meters, so you click an app instead of
+typing `Spotify.exe`. The list comes from `wasapi-loopback.exe --list-audio-apps` (Windows audio
+session API: `IAudioSessionManager2` on the default render endpoint, grouped by process name,
+peak sampled for ~160 ms), exposed as `listAudioApps()` / the `audio:apps` IPC and polled about
+once a second while the picker is open. The rule is saved the moment it changes. `settings:get`
+**must** return `systemAudio` — it once didn't, so the UI never saw the saved app and any Settings
+save wiped it.
+
+Threaded through `WasapiCapture` as `--exclude-process <name>` / `--include-process <name>` flags
+(`<name>` may be `pid:1234`). `native/WasapiLoopbackRecorder.cs` uses Windows' **process loopback
+API** (`ActivateAudioInterfaceAsync` on the virtual device path `"VAD\Process_Loopback"` with
+`AUDIOCLIENT_ACTIVATION_PARAMS`, `PROCESS_LOOPBACK_MODE_INCLUDE_/EXCLUDE_TARGET_PROCESS_TREE`,
+Windows 10 2004+/Windows 11 only) instead of the normal `IMMDevice`-endpoint loopback. A name
+resolves to the longest-running matching PID (the likely tree root). Only one app per recording
+(an OS API constraint), and a browser is one app — individual tabs can't be separated.
+
+On start the recorder writes `[wasapi] STATUS {mode,target,attached,pid}` to stderr;
+`WasapiCapture` parses it and `LiveSession` forwards it (`onAudioSource` → `live:audio-source`)
+so the recording screen shows what is actually happening. If the app isn't running: `only` mode
+refuses to start (capturing everything would silently record apps you left out); `block` mode
+captures everything and the UI says plainly that nothing is being blocked.
 
 Two non-obvious interop requirements this code path depends on — both cost real debugging time,
 don't remove either:
