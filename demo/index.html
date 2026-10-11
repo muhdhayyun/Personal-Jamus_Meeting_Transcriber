@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>Jamus: interactive demo</title>
+  <meta name="description" content="Interactive demo of Jamus, a local, privacy-first meeting transcriber. Runs on hard-coded sample data; nothing is recorded." />
+  <!-- The real app UI, unchanged. Paths are absolute so the page works from any URL (see vercel.json). -->
+  <link rel="stylesheet" href="/electron/renderer/styles.css" />
+  <link rel="stylesheet" href="/demo/demo.css" />
+</head>
+<body>
+  <div class="demo-banner">
+    <strong>Interactive demo</strong> · sample data only, nothing is recorded or uploaded ·
+    <a href="https://github.com/muhdhayyun/Personal-Jamus_Meeting_Transcriber" target="_blank" rel="noopener noreferrer">Get the real app on GitHub</a>
+  </div>
+
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">🎙️</div>
+        <div class="brand-text">
+          <div class="brand-name">Jamus</div>
+          <div class="brand-sub">Local meeting transcriber</div>
+        </div>
+      </div>
+
+      <button id="recordBtn" class="record-btn">
+        <span class="dot"></span> New recording
+      </button>
+      <button id="importBtn" class="import-btn">⤓ Import audio file</button>
+
+      <div class="meetings-head">
+        <span>Meetings</span>
+        <button id="refreshBtn" class="icon-btn" title="Refresh">⟳</button>
+      </div>
+      <div id="meetingList" class="meeting-list"></div>
+
+      <div class="sidebar-footer">
+        <button id="settingsBtn" class="settings-btn">⚙ Settings</button>
+        <button id="themeBtn" class="theme-btn" title="Toggle dark mode">🌙</button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="content">
+      <div id="statusBar" class="status-bar hidden"></div>
+      <div id="view" class="view"></div>
+    </main>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Settings</h2>
+        <button id="settingsClose" class="icon-btn">✕</button>
+      </div>
+      <div id="settingsBody" class="modal-body"></div>
+      <div class="modal-foot">
+        <span id="settingsSaved" class="saved-msg"></span>
+        <button id="settingsSave" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hard-coded stand-in for the Electron bridge, then the real renderer. -->
+  <script src="/demo/mock-jamus.js"></script>
+  <script src="/electron/renderer/renderer.js"></script>
+</body>
+</html>

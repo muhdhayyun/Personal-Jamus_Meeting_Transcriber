@@ -1,0 +1,16 @@
+# The static demo only needs demo/ and electron/renderer/. Keep everything else out of the deployment.
+/native
+/src
+/scripts
+/bin
+/config
+/vendor
+/release
+/transcripts
+/recordings
+/Drop-In Recordings
+/electron/main.cjs
+/electron/preload.cjs
+*.md
+package.json
+package-lock.json

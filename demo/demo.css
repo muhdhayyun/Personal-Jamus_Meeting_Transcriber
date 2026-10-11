@@ -1,0 +1,9 @@
+/* Demo-only chrome around the real app UI. */
+.demo-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  padding: 6px 12px; text-align: center; font-size: 12px;
+  background: var(--accent); color: #fff;
+}
+.demo-banner a { color: #fff; text-decoration: underline; }
+/* Push the app below the banner (the app is normally full-viewport height). */
+#app { margin-top: 28px; height: calc(100vh - 28px); }
